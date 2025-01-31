@@ -1,5 +1,6 @@
 import json
 
+from typing import Tuple
 from sqlalchemy.orm import Session
 import openai
 from db import SessionLocal, ChatSession, ChatMessage
@@ -22,14 +23,16 @@ def get_db():
 
 
 # Function to start a new chat session or retrieve an existing one
-def get_or_create_session(db: Session, user_id: str) -> ChatSession:
+def get_or_create_session(db: Session, user_id: str) -> Tuple[ChatSession, bool]:
     session = db.query(ChatSession).filter(ChatSession.user_id == user_id).first()
+    exists = True
     if not session:
         session = ChatSession(user_id=user_id)
         db.add(session)
         db.commit()
         db.refresh(session)
-    return session
+        exists = False
+    return session, exists
 
 
 # Function to store messages in the database
@@ -46,13 +49,21 @@ async def chat_with_openai(request: dict, db: Session):
     user_message = request["message"]
 
     # Retrieve or create a new chat session
-    session = get_or_create_session(db, user_id)
+    session, exists = get_or_create_session(db, user_id)
+
+    if not exists:
+        store_message(
+            db,
+            session.id,
+            "system",
+            "Context: You are the support AI bot for Mori. Users will try to find products from us, and you should find the best item they are looking for from all the products in our website.",
+        )
 
     # Store the user's message in the session
     store_message(db, session.id, "user", user_message)
 
     # Prepare the conversation history
-    messages = [{"role": "user", "content": user_message}]
+    messages = []
     for message in session.messages:
         messages.append({"role": message.sender, "content": message.content})
 
@@ -72,7 +83,7 @@ async def chat_with_openai(request: dict, db: Session):
                         },
                         "filters": {
                             "type": "string",
-                            "description": "Optional filters for the search, e.g., 'price>1000'.",
+                            "description": "Optional filters for the search. The list of available filters is current_price>70 AND current_price<80.",
                         },
                     },
                     "required": ["query", "filters"],
@@ -93,8 +104,21 @@ async def chat_with_openai(request: dict, db: Session):
     if response.choices[0].finish_reason == "tool_calls":
         function_args_str = response.choices[0].message.tool_calls[0].function.arguments
         function_args = json.loads(function_args_str)
-        return {"query": function_args.get("query"), "searchParams": function_args}
 
+        context = f"Context: The user searched for {function_args.get('query')} under {function_args.get('filters')}, focus on this now."
+        store_message(db, session.id, "system", context)
+        messages = [{"role": "system", "content": context}] + messages
+        response = openai.chat.completions.create(
+            messages=messages,
+            model="gpt-3.5-turbo",
+        )
+        openai_message = response.choices[0].message.content
+        store_message(db, session.id, "assistant", openai_message)
+        return {
+            "query": function_args.get("query"),
+            "searchParams": function_args,
+            "response": openai_message,
+        }
     else:
         openai_message = response.choices[0].message.content
         store_message(db, session.id, "assistant", openai_message)
