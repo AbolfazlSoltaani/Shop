@@ -20,6 +20,14 @@ services:
       - ./data.ms:/data.ms
     restart: unless-stopped
 
+  shop-backend:
+    container_name: shop-backed
+    image: shop:latest
+    environment:
+      - MEILISEARCH_URL=http://localhost:7700
+      - MEILISEARCH_API_KEY=token
+      - OPENAI_API_KEY=token
+
 networks:
   meilisearch:
     driver: bridge
